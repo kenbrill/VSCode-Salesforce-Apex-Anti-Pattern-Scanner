@@ -5,7 +5,8 @@ import {
     DMLInfo,
     MethodInfo,
     MethodCallInfo,
-    HardcodedIdInfo
+    HardcodedIdInfo,
+    FieldReferenceInfo
 } from '../types';
 
 /**
@@ -30,7 +31,10 @@ export class ApexParser {
             dmlOperations: this.findDMLOperations(),
             methods: this.findMethods(),
             methodCalls: this.findMethodCalls(),
-            hardcodedIds: this.findHardcodedIds()
+            hardcodedIds: this.findHardcodedIds(),
+            fieldReferences: this.findFieldReferences(),
+            isTestClass: this.checkIsTestClass(),
+            className: this.findClassName()
         };
     }
 
@@ -555,5 +559,201 @@ export class ApexParser {
         }
 
         return inString || inLineComment || inBlockComment;
+    }
+
+    /**
+     * Check if this is a test class
+     */
+    private checkIsTestClass(): boolean {
+        // Look for @isTest annotation or testMethod keyword
+        return /@isTest/i.test(this.text) || /\btestMethod\b/i.test(this.text);
+    }
+
+    /**
+     * Find the class name
+     */
+    private findClassName(): string {
+        // Match class or interface declaration
+        const classMatch = this.text.match(/(?:public|private|global)\s+(?:with\s+sharing\s+|without\s+sharing\s+|inherited\s+sharing\s+)?(?:virtual\s+|abstract\s+)?class\s+(\w+)/i);
+        if (classMatch) {
+            return classMatch[1];
+        }
+        return '';
+    }
+
+    /**
+     * Find all field references in the code (custom fields with __c suffix and standard fields)
+     */
+    private findFieldReferences(): FieldReferenceInfo[] {
+        const fields: FieldReferenceInfo[] = [];
+        const seenFields = new Set<string>();
+
+        // Pattern 1: Custom fields with __c suffix (e.g., Account_Billing_Country__c, My_Field__c)
+        const customFieldPattern = /\b(\w+__c)\b/gi;
+        let match;
+
+        while ((match = customFieldPattern.exec(this.text)) !== null) {
+            const fieldName = match[1];
+
+            // Skip if in string or comment (but allow in SOQL which uses brackets)
+            if (this.isInStringOrComment(match.index) && !this.isInSOQLBrackets(match.index)) {
+                continue;
+            }
+
+            // Skip duplicates
+            const normalizedName = fieldName.toLowerCase();
+            if (seenFields.has(normalizedName)) {
+                continue;
+            }
+            seenFields.add(normalizedName);
+
+            const position = this.getLineAndChar(match.index);
+            fields.push({
+                fieldName: fieldName,
+                line: position.line,
+                startChar: position.char,
+                endChar: position.char + fieldName.length
+            });
+        }
+
+        // Pattern 2: Relationship fields (e.g., Account.Sales_Region_Override__c, Contact.Account.Name)
+        const relationshipPattern = /\b(\w+)\.(\w+__c|\w+__r)\b/gi;
+
+        while ((match = relationshipPattern.exec(this.text)) !== null) {
+            const objectName = match[1];
+            const fieldName = match[2];
+
+            // Skip common non-field patterns
+            if (['System', 'Database', 'Test', 'Math', 'String', 'Integer', 'Date', 'DateTime', 'Decimal', 'Boolean', 'Schema', 'JSON', 'Type'].includes(objectName)) {
+                continue;
+            }
+
+            if (this.isInStringOrComment(match.index) && !this.isInSOQLBrackets(match.index)) {
+                continue;
+            }
+
+            const normalizedName = `${objectName}.${fieldName}`.toLowerCase();
+            if (seenFields.has(normalizedName)) {
+                continue;
+            }
+            seenFields.add(normalizedName);
+
+            const position = this.getLineAndChar(match.index);
+            fields.push({
+                fieldName: fieldName,
+                objectName: objectName,
+                line: position.line,
+                startChar: position.char,
+                endChar: position.char + match[0].length
+            });
+        }
+
+        // Pattern 3: Fields in SOQL SELECT clauses and WHERE clauses
+        const soqlFieldPattern = /\[\s*SELECT\s+([\s\S]*?)\s+FROM\s+(\w+)([\s\S]*?)\]/gi;
+
+        while ((match = soqlFieldPattern.exec(this.text)) !== null) {
+            const selectClause = match[1];
+            const fromObject = match[2];
+            const restOfQuery = match[3] || '';
+
+            // Extract fields from SELECT clause
+            const selectFields = selectClause.split(',').map(f => f.trim());
+            for (const field of selectFields) {
+                // Handle relationship fields like Account.Name
+                const fieldParts = field.split('.');
+                const actualField = fieldParts[fieldParts.length - 1];
+
+                if (actualField && /^[a-zA-Z_]\w*$/.test(actualField)) {
+                    const normalizedName = actualField.toLowerCase();
+                    if (!seenFields.has(normalizedName) && !this.isSOQLKeyword(actualField)) {
+                        seenFields.add(normalizedName);
+                        const position = this.getLineAndChar(match.index);
+                        fields.push({
+                            fieldName: actualField,
+                            objectName: fieldParts.length > 1 ? fieldParts[fieldParts.length - 2] : fromObject,
+                            line: position.line,
+                            startChar: position.char,
+                            endChar: position.char + actualField.length
+                        });
+                    }
+                }
+            }
+
+            // Extract fields from WHERE clause
+            const whereMatch = restOfQuery.match(/WHERE\s+([\s\S]*?)(?:ORDER|GROUP|LIMIT|$)/i);
+            if (whereMatch) {
+                const whereClause = whereMatch[1];
+                // Find field references in WHERE clause
+                const whereFieldPattern = /\b(\w+(?:\.\w+)?)\s*(?:=|!=|<|>|<=|>=|LIKE|IN|NOT\s+IN)\s*/gi;
+                let whereField;
+                while ((whereField = whereFieldPattern.exec(whereClause)) !== null) {
+                    const fieldRef = whereField[1];
+                    const fieldParts = fieldRef.split('.');
+                    const actualField = fieldParts[fieldParts.length - 1];
+
+                    if (actualField && !this.isSOQLKeyword(actualField)) {
+                        const normalizedName = actualField.toLowerCase();
+                        if (!seenFields.has(normalizedName)) {
+                            seenFields.add(normalizedName);
+                            const position = this.getLineAndChar(match.index);
+                            fields.push({
+                                fieldName: actualField,
+                                objectName: fieldParts.length > 1 ? fieldParts[0] : fromObject,
+                                line: position.line,
+                                startChar: position.char,
+                                endChar: position.char + actualField.length
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        return fields;
+    }
+
+    /**
+     * Check if a keyword is a SOQL reserved word
+     */
+    private isSOQLKeyword(word: string): boolean {
+        const keywords = [
+            'SELECT', 'FROM', 'WHERE', 'AND', 'OR', 'NOT', 'IN', 'LIKE',
+            'ORDER', 'BY', 'ASC', 'DESC', 'NULLS', 'FIRST', 'LAST',
+            'GROUP', 'HAVING', 'LIMIT', 'OFFSET', 'FOR', 'UPDATE', 'VIEW',
+            'REFERENCE', 'TRUE', 'FALSE', 'NULL', 'YESTERDAY', 'TODAY',
+            'TOMORROW', 'LAST_WEEK', 'THIS_WEEK', 'NEXT_WEEK', 'LAST_MONTH',
+            'THIS_MONTH', 'NEXT_MONTH', 'LAST_90_DAYS', 'NEXT_90_DAYS',
+            'LAST_N_DAYS', 'NEXT_N_DAYS', 'THIS_QUARTER', 'LAST_QUARTER',
+            'NEXT_QUARTER', 'THIS_YEAR', 'LAST_YEAR', 'NEXT_YEAR', 'ALL', 'ROWS'
+        ];
+        return keywords.includes(word.toUpperCase());
+    }
+
+    /**
+     * Check if a position is inside SOQL brackets
+     */
+    private isInSOQLBrackets(offset: number): boolean {
+        let bracketDepth = 0;
+        let inSOQL = false;
+
+        for (let i = 0; i < offset; i++) {
+            const char = this.text[i];
+
+            if (char === '[') {
+                bracketDepth++;
+                // Check if this starts a SOQL query
+                const ahead = this.text.substring(i + 1, i + 20);
+                if (/^\s*SELECT/i.test(ahead)) {
+                    inSOQL = true;
+                }
+            } else if (char === ']') {
+                bracketDepth--;
+                if (bracketDepth === 0) {
+                    inSOQL = false;
+                }
+            }
+        }
+
+        return inSOQL && bracketDepth > 0;
     }
 }

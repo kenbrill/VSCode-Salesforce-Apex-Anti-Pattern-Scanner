@@ -9,7 +9,8 @@ export enum AntiPatternType {
     SOQLInLoopViaMethod = 'SOQL_IN_LOOP_VIA_METHOD',
     DMLInLoopViaMethod = 'DML_IN_LOOP_VIA_METHOD',
     HardcodedId = 'HARDCODED_ID',
-    MissingLimit = 'MISSING_LIMIT'
+    MissingLimit = 'MISSING_LIMIT',
+    UntestedField = 'UNTESTED_FIELD'
 }
 
 /**
@@ -21,7 +22,8 @@ export const AntiPatternSeverity: Record<AntiPatternType, vscode.DiagnosticSever
     [AntiPatternType.SOQLInLoopViaMethod]: vscode.DiagnosticSeverity.Error,
     [AntiPatternType.DMLInLoopViaMethod]: vscode.DiagnosticSeverity.Error,
     [AntiPatternType.HardcodedId]: vscode.DiagnosticSeverity.Warning,
-    [AntiPatternType.MissingLimit]: vscode.DiagnosticSeverity.Warning
+    [AntiPatternType.MissingLimit]: vscode.DiagnosticSeverity.Warning,
+    [AntiPatternType.UntestedField]: vscode.DiagnosticSeverity.Warning
 };
 
 /**
@@ -104,6 +106,17 @@ export interface HardcodedIdInfo {
 }
 
 /**
+ * Represents a field reference in the code
+ */
+export interface FieldReferenceInfo {
+    fieldName: string;
+    objectName?: string;  // Parent object if known (e.g., Account in Account.Name)
+    line: number;
+    startChar: number;
+    endChar: number;
+}
+
+/**
  * Extension configuration
  */
 export interface ExtensionConfig {
@@ -114,6 +127,7 @@ export interface ExtensionConfig {
     detectHardcodedIds: boolean;
     detectMissingLimits: boolean;
     followMethodCalls: boolean;
+    detectUntestedFields: boolean;
 }
 
 /**
@@ -126,4 +140,7 @@ export interface ParsedApexFile {
     methods: MethodInfo[];
     methodCalls: MethodCallInfo[];
     hardcodedIds: HardcodedIdInfo[];
+    fieldReferences: FieldReferenceInfo[];
+    isTestClass: boolean;
+    className: string;
 }

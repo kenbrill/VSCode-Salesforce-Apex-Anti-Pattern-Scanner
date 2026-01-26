@@ -343,4 +343,54 @@ export class AntiPatternAnalyzer {
     private isInLoop(line: number, loop: LoopInfo): boolean {
         return line >= loop.startLine && line <= loop.endLine;
     }
+
+    /**
+     * Analyze for fields in source class that aren't referenced in test class
+     */
+    analyzeUntestedFields(sourceParsed: ParsedApexFile, testParsed: ParsedApexFile): AntiPatternIssue[] {
+        const issues: AntiPatternIssue[] = [];
+
+        // Get all field names from source class (normalized to lowercase)
+        const sourceFields = new Map<string, { fieldName: string; line: number; startChar: number; endChar: number }>();
+        for (const field of sourceParsed.fieldReferences) {
+            const normalizedName = field.fieldName.toLowerCase();
+            if (!sourceFields.has(normalizedName)) {
+                sourceFields.set(normalizedName, {
+                    fieldName: field.fieldName,
+                    line: field.line,
+                    startChar: field.startChar,
+                    endChar: field.endChar
+                });
+            }
+        }
+
+        // Get all field names from test class (normalized to lowercase)
+        const testFields = new Set<string>();
+        for (const field of testParsed.fieldReferences) {
+            testFields.add(field.fieldName.toLowerCase());
+        }
+
+        // Find fields in source that aren't in test
+        for (const [normalizedName, fieldInfo] of sourceFields) {
+            if (!testFields.has(normalizedName)) {
+                // Skip standard fields that are commonly not explicitly tested
+                const skipFields = ['id', 'name', 'createddate', 'lastmodifieddate', 'createdbyid',
+                    'lastmodifiedbyid', 'systemmodstamp', 'isdeleted', 'ownerid'];
+                if (skipFields.includes(normalizedName)) {
+                    continue;
+                }
+
+                issues.push({
+                    type: AntiPatternType.UntestedField,
+                    message: `Field '${fieldInfo.fieldName}' is referenced in source class but not in test class. Consider adding test coverage for this field.`,
+                    range: new vscode.Range(
+                        fieldInfo.line, fieldInfo.startChar,
+                        fieldInfo.line, fieldInfo.endChar
+                    )
+                });
+            }
+        }
+
+        return issues;
+    }
 }

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { ApexParser } from './parser/apexParser';
 import { AntiPatternAnalyzer } from './analyzer/antiPatternAnalyzer';
-import { ExtensionConfig, AntiPatternSeverity, AntiPatternIssue } from './types';
+import { ExtensionConfig, AntiPatternSeverity, AntiPatternIssue, ParsedApexFile } from './types';
 
 let diagnosticCollection: vscode.DiagnosticCollection;
 
@@ -50,7 +50,7 @@ export function activate(context: vscode.ExtensionContext) {
                         });
 
                         const document = await vscode.workspace.openTextDocument(file);
-                        const issues = scanDocument(document);
+                        const issues = await scanDocument(document);
                         totalIssues += issues;
                     }
                 }
@@ -117,14 +117,15 @@ function getConfig(): ExtensionConfig {
         detectDMLInLoops: config.get<boolean>('detectDMLInLoops', true),
         detectHardcodedIds: config.get<boolean>('detectHardcodedIds', true),
         detectMissingLimits: config.get<boolean>('detectMissingLimits', false),
-        followMethodCalls: config.get<boolean>('followMethodCalls', true)
+        followMethodCalls: config.get<boolean>('followMethodCalls', true),
+        detectUntestedFields: config.get<boolean>('detectUntestedFields', true)
     };
 }
 
 /**
  * Scan a document for anti-patterns
  */
-function scanDocument(document: vscode.TextDocument): number {
+async function scanDocument(document: vscode.TextDocument): Promise<number> {
     const config = getConfig();
     const text = document.getText();
 
@@ -134,7 +135,17 @@ function scanDocument(document: vscode.TextDocument): number {
 
     // Analyze for anti-patterns
     const analyzer = new AntiPatternAnalyzer(config);
-    const issues = analyzer.analyze(parsed);
+    let issues = analyzer.analyze(parsed);
+
+    // If this is not a test class and detectUntestedFields is enabled,
+    // find the corresponding test class and check for untested fields
+    if (config.detectUntestedFields && !parsed.isTestClass && parsed.className) {
+        const testClassParsed = await findAndParseTestClass(parsed.className);
+        if (testClassParsed) {
+            const untestedFieldIssues = analyzer.analyzeUntestedFields(parsed, testClassParsed);
+            issues = issues.concat(untestedFieldIssues);
+        }
+    }
 
     // Convert to VS Code diagnostics
     const diagnostics = issues.map(issue => createDiagnostic(issue, document));
@@ -143,6 +154,34 @@ function scanDocument(document: vscode.TextDocument): number {
     diagnosticCollection.set(document.uri, diagnostics);
 
     return issues.length;
+}
+
+/**
+ * Find and parse the test class corresponding to a source class
+ */
+async function findAndParseTestClass(className: string): Promise<ParsedApexFile | null> {
+    // Common test class naming patterns
+    const testClassPatterns = [
+        `${className}Test.cls`,
+        `${className}_Test.cls`,
+        `Test${className}.cls`,
+        `${className}Tests.cls`
+    ];
+
+    for (const pattern of testClassPatterns) {
+        const files = await vscode.workspace.findFiles(`**/${pattern}`, '**/node_modules/**');
+        if (files.length > 0) {
+            try {
+                const document = await vscode.workspace.openTextDocument(files[0]);
+                const parser = new ApexParser(document.getText());
+                return parser.parse();
+            } catch (e) {
+                // Continue to next pattern
+            }
+        }
+    }
+
+    return null;
 }
 
 /**

@@ -14,6 +14,7 @@ A Visual Studio Code extension that detects common Apex anti-patterns in real-ti
 | DML via Method Calls | Error | Detects methods containing DML that are called from within loops |
 | Hardcoded IDs | Warning | Detects hardcoded Salesforce record IDs that break between environments |
 | Missing LIMIT | Warning | Detects SOQL queries without a `LIMIT` clause (disabled by default) |
+| Untested Fields | Warning | Detects fields referenced in source classes that are not used in corresponding test classes |
 
 ### Real-Time Analysis
 
@@ -61,6 +62,7 @@ Configure the extension in VS Code settings (`Ctrl+,` / `Cmd+,`):
 | `sfAntipattern.detectHardcodedIds` | boolean | `true` | Detect hardcoded Salesforce IDs |
 | `sfAntipattern.detectMissingLimits` | boolean | `false` | Detect SOQL queries without LIMIT clause |
 | `sfAntipattern.followMethodCalls` | boolean | `true` | Follow method calls to detect SOQL/DML in called methods |
+| `sfAntipattern.detectUntestedFields` | boolean | `true` | Detect fields in source classes not referenced in test classes |
 
 ### Example settings.json
 
@@ -117,6 +119,38 @@ Account acc = [SELECT Id FROM Account WHERE Id = '001000000000001'];
 // GOOD - Use Custom Settings or Custom Metadata
 Account acc = [SELECT Id FROM Account WHERE Id = :MyCustomSetting__c.getInstance().AccountId__c];
 ```
+
+### Untested Field (Warning)
+
+If your source class queries fields that aren't referenced in the test class, you may have gaps in test coverage:
+
+```apex
+// MyClass.cls - Source class
+public class MyClass {
+    public void cleanup() {
+        List<Opportunity> opps = [
+            SELECT Id FROM Opportunity
+            WHERE Account_Billing_Country__c != 'US'    // <-- Warning: not in test
+            AND Account.Sales_Region_Override__c != 'NA' // <-- Warning: not in test
+        ];
+    }
+}
+
+// MyClassTest.cls - Test class (missing field references)
+@isTest
+private class MyClassTest {
+    @isTest
+    static void testCleanup() {
+        // Test data doesn't set Account_Billing_Country__c or Sales_Region_Override__c
+        // This means those filter conditions aren't being tested!
+        Account acc = new Account(Name = 'Test');
+        insert acc;
+        // ...
+    }
+}
+```
+
+The scanner will flag `Account_Billing_Country__c` and `Sales_Region_Override__c` as untested fields, reminding you to add test cases that verify these conditions work correctly.
 
 ## Why These Patterns Matter
 

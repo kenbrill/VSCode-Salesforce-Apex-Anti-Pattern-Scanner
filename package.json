@@ -63,6 +63,11 @@
           "type": "boolean",
           "default": true,
           "description": "Follow method calls to detect SOQL/DML in called methods"
+        },
+        "sfAntipattern.detectUntestedFields": {
+          "type": "boolean",
+          "default": true,
+          "description": "Detect fields referenced in source classes that are not used in corresponding test classes"
         }
       }
     }
