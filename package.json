@@ -1,0 +1,85 @@
+{
+  "name": "salesforce-antipattern-scanner",
+  "displayName": "Salesforce Apex Anti-Pattern Scanner",
+  "description": "Detects common Apex anti-patterns like SOQL/DML in loops, hardcoded IDs, and missing LIMIT clauses",
+  "version": "0.0.1",
+  "publisher": "your-publisher-name",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Linters",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:apex"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "sfAntipattern.scanFile",
+        "title": "Salesforce: Scan File for Anti-Patterns"
+      },
+      {
+        "command": "sfAntipattern.scanWorkspace",
+        "title": "Salesforce: Scan Workspace for Anti-Patterns"
+      }
+    ],
+    "configuration": {
+      "title": "Salesforce Anti-Pattern Scanner",
+      "properties": {
+        "sfAntipattern.enableOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scan for anti-patterns when saving Apex files"
+        },
+        "sfAntipattern.enableRealTime": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scan for anti-patterns in real-time as you type"
+        },
+        "sfAntipattern.detectSOQLInLoops": {
+          "type": "boolean",
+          "default": true,
+          "description": "Detect SOQL queries inside loops"
+        },
+        "sfAntipattern.detectDMLInLoops": {
+          "type": "boolean",
+          "default": true,
+          "description": "Detect DML operations inside loops"
+        },
+        "sfAntipattern.detectHardcodedIds": {
+          "type": "boolean",
+          "default": true,
+          "description": "Detect hardcoded Salesforce IDs"
+        },
+        "sfAntipattern.detectMissingLimits": {
+          "type": "boolean",
+          "default": false,
+          "description": "Detect SOQL queries without LIMIT clause (can be noisy)"
+        },
+        "sfAntipattern.followMethodCalls": {
+          "type": "boolean",
+          "default": true,
+          "description": "Follow method calls to detect SOQL/DML in called methods"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0"
+  }
+}
