@@ -10,10 +10,10 @@ A Visual Studio Code extension that detects common Apex anti-patterns in real-ti
 |-------------|----------|-------------|
 | SOQL in Loops | Error | Detects SOQL queries executed inside `for`, `while`, or `do-while` loops |
 | DML in Loops | Error | Detects DML operations (`insert`, `update`, `delete`, `upsert`, `merge`, `undelete`) inside loops |
-| SOQL via Method Calls | Warning | Detects methods containing SOQL that are called from within loops |
-| DML via Method Calls | Warning | Detects methods containing DML that are called from within loops |
+| SOQL via Method Calls | Error | Detects methods containing SOQL that are called from within loops |
+| DML via Method Calls | Error | Detects methods containing DML that are called from within loops |
 | Hardcoded IDs | Warning | Detects hardcoded Salesforce record IDs that break between environments |
-| Missing LIMIT | Info | Detects SOQL queries without a `LIMIT` clause (disabled by default) |
+| Missing LIMIT | Warning | Detects SOQL queries without a `LIMIT` clause (disabled by default) |
 
 ### Real-Time Analysis
 

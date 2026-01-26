@@ -18,10 +18,10 @@ export enum AntiPatternType {
 export const AntiPatternSeverity: Record<AntiPatternType, vscode.DiagnosticSeverity> = {
     [AntiPatternType.SOQLInLoop]: vscode.DiagnosticSeverity.Error,
     [AntiPatternType.DMLInLoop]: vscode.DiagnosticSeverity.Error,
-    [AntiPatternType.SOQLInLoopViaMethod]: vscode.DiagnosticSeverity.Warning,
-    [AntiPatternType.DMLInLoopViaMethod]: vscode.DiagnosticSeverity.Warning,
+    [AntiPatternType.SOQLInLoopViaMethod]: vscode.DiagnosticSeverity.Error,
+    [AntiPatternType.DMLInLoopViaMethod]: vscode.DiagnosticSeverity.Error,
     [AntiPatternType.HardcodedId]: vscode.DiagnosticSeverity.Warning,
-    [AntiPatternType.MissingLimit]: vscode.DiagnosticSeverity.Information
+    [AntiPatternType.MissingLimit]: vscode.DiagnosticSeverity.Warning
 };
 
 /**
