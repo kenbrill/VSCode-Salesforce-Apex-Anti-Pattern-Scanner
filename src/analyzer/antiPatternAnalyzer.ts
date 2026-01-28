@@ -42,6 +42,15 @@ export class AntiPatternAnalyzer {
             issues.push(...this.detectMissingLimits(parsed));
         }
 
+        if (this.config.detectRecordTypeQueries) {
+            issues.push(...this.detectRecordTypeQueries(parsed));
+        }
+
+        if (this.config.detectNonBulkifiedMethods) {
+            issues.push(...this.detectSingleSObjectParameter(parsed));
+            issues.push(...this.detectNonBulkifiedInvocable(parsed));
+        }
+
         return issues;
     }
 
@@ -60,7 +69,7 @@ export class AntiPatternAnalyzer {
                         message: `SOQL query inside ${loop.type} loop. This can cause governor limit issues. Consider bulkifying by querying outside the loop.`,
                         range: new vscode.Range(
                             soql.line, soql.startChar,
-                            soql.line, soql.endChar
+                            soql.endLine, soql.endChar
                         )
                     });
                 }
@@ -328,7 +337,115 @@ export class AntiPatternAnalyzer {
                     message: `SOQL query without LIMIT clause. Consider adding LIMIT to prevent unexpected large data volumes.`,
                     range: new vscode.Range(
                         soql.line, soql.startChar,
-                        soql.line, soql.endChar
+                        soql.endLine, soql.endChar
+                    )
+                });
+            }
+        }
+
+        return issues;
+    }
+
+    /**
+     * Detect SOQL queries on RecordType object
+     */
+    private detectRecordTypeQueries(parsed: ParsedApexFile): AntiPatternIssue[] {
+        const issues: AntiPatternIssue[] = [];
+
+        for (const soql of parsed.soqlQueries) {
+            // Check if the query is selecting from RecordType
+            if (/\bFROM\s+RecordType\b/i.test(soql.query)) {
+                issues.push({
+                    type: AntiPatternType.RecordTypeQuery,
+                    message: `Avoid SOQL on RecordType. Use Schema.SObjectType.YourObject.getRecordTypeInfosByDeveloperName() instead - it's cached and doesn't count against SOQL limits.`,
+                    range: new vscode.Range(
+                        soql.line, soql.startChar,
+                        soql.endLine, soql.endChar
+                    )
+                });
+            }
+        }
+
+        return issues;
+    }
+
+    /**
+     * Detect methods with single SObject parameters that perform DML on them
+     */
+    private detectSingleSObjectParameter(parsed: ParsedApexFile): AntiPatternIssue[] {
+        const issues: AntiPatternIssue[] = [];
+
+        for (const method of parsed.methods) {
+            // Skip if method has no parameters or has collection parameters
+            if (method.parameters.length !== 1) {
+                continue;
+            }
+
+            const param = method.parameters[0];
+
+            // Check if the single parameter is a non-collection SObject
+            if (!param.isSObject || param.isCollection) {
+                continue;
+            }
+
+            // Check if the method contains DML that targets this parameter
+            for (const dml of method.containsDML) {
+                if (dml.targetVariable === param.name) {
+                    issues.push({
+                        type: AntiPatternType.SingleSObjectParameter,
+                        message: `Method '${method.name}' accepts a single ${param.type} and performs DML on it. Consider accepting List<${param.type}> for bulkification.`,
+                        range: new vscode.Range(
+                            method.startLine, method.startChar,
+                            method.startLine, method.startChar + method.name.length + 20
+                        )
+                    });
+                    break; // Only report once per method
+                }
+            }
+        }
+
+        return issues;
+    }
+
+    /**
+     * Detect @InvocableMethod methods that don't accept a List parameter
+     */
+    private detectNonBulkifiedInvocable(parsed: ParsedApexFile): AntiPatternIssue[] {
+        const issues: AntiPatternIssue[] = [];
+
+        for (const method of parsed.methods) {
+            // Check if method has @InvocableMethod annotation
+            const hasInvocableMethod = method.annotations.some(
+                a => a.name.toLowerCase() === 'invocablemethod'
+            );
+
+            if (!hasInvocableMethod) {
+                continue;
+            }
+
+            // @InvocableMethod must have exactly one parameter that is a List
+            if (method.parameters.length === 0) {
+                issues.push({
+                    type: AntiPatternType.NonBulkifiedInvocable,
+                    message: `@InvocableMethod '${method.name}' must accept a List parameter. Invocable methods receive bulk input.`,
+                    range: new vscode.Range(
+                        method.startLine, method.startChar,
+                        method.startLine, method.startChar + method.name.length + 20
+                    )
+                });
+                continue;
+            }
+
+            const firstParam = method.parameters[0];
+
+            // Check if the first parameter is a List
+            if (!firstParam.isCollection || !firstParam.type.toLowerCase().startsWith('list')) {
+                issues.push({
+                    type: AntiPatternType.NonBulkifiedInvocable,
+                    message: `@InvocableMethod '${method.name}' should accept a List<${firstParam.type}> parameter. Invocable methods receive bulk input and should be bulkified.`,
+                    range: new vscode.Range(
+                        method.startLine, method.startChar,
+                        method.startLine, method.startChar + method.name.length + 20
                     )
                 });
             }
@@ -373,9 +490,14 @@ export class AntiPatternAnalyzer {
         // Find fields in source that aren't in test
         for (const [normalizedName, fieldInfo] of sourceFields) {
             if (!testFields.has(normalizedName)) {
+                // Skip relationship fields (ending in __r)
+                if (normalizedName.endsWith('__r')) {
+                    continue;
+                }
+
                 // Skip standard fields that are commonly not explicitly tested
-                const skipFields = ['id', 'name', 'createddate', 'lastmodifieddate', 'createdbyid',
-                    'lastmodifiedbyid', 'systemmodstamp', 'isdeleted', 'ownerid'];
+                const skipFields = ['id', 'createddate', 'lastmodifieddate',
+                    'lastmodifiedbyid', 'systemmodstamp', 'isdeleted'];
                 if (skipFields.includes(normalizedName)) {
                     continue;
                 }

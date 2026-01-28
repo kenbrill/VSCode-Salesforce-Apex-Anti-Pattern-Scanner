@@ -15,10 +15,11 @@ export function activate(context: vscode.ExtensionContext) {
     // Register commands
     const scanFileCommand = vscode.commands.registerCommand(
         'sfAntipattern.scanFile',
-        () => {
+        async () => {
             const editor = vscode.window.activeTextEditor;
             if (editor && editor.document.languageId === 'apex') {
-                scanDocument(editor.document);
+                const issues = await scanDocument(editor.document);
+                vscode.window.showInformationMessage(`Scan complete. Found ${issues} issue(s).`);
             } else {
                 vscode.window.showWarningMessage('Please open an Apex file to scan');
             }
@@ -118,7 +119,9 @@ function getConfig(): ExtensionConfig {
         detectHardcodedIds: config.get<boolean>('detectHardcodedIds', true),
         detectMissingLimits: config.get<boolean>('detectMissingLimits', false),
         followMethodCalls: config.get<boolean>('followMethodCalls', true),
-        detectUntestedFields: config.get<boolean>('detectUntestedFields', true)
+        detectUntestedFields: config.get<boolean>('detectUntestedFields', true),
+        detectRecordTypeQueries: config.get<boolean>('detectRecordTypeQueries', true),
+        detectNonBulkifiedMethods: config.get<boolean>('detectNonBulkifiedMethods', true)
     };
 }
 
@@ -132,6 +135,12 @@ async function scanDocument(document: vscode.TextDocument): Promise<number> {
     // Parse the Apex file
     const parser = new ApexParser(text);
     const parsed = parser.parse();
+
+    // Skip anti-pattern analysis for test classes
+    if (parsed.isTestClass) {
+        diagnosticCollection.set(document.uri, []);
+        return 0;
+    }
 
     // Analyze for anti-patterns
     const analyzer = new AntiPatternAnalyzer(config);

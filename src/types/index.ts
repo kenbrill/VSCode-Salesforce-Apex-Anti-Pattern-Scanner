@@ -10,7 +10,10 @@ export enum AntiPatternType {
     DMLInLoopViaMethod = 'DML_IN_LOOP_VIA_METHOD',
     HardcodedId = 'HARDCODED_ID',
     MissingLimit = 'MISSING_LIMIT',
-    UntestedField = 'UNTESTED_FIELD'
+    UntestedField = 'UNTESTED_FIELD',
+    RecordTypeQuery = 'RECORDTYPE_QUERY',
+    SingleSObjectParameter = 'SINGLE_SOBJECT_PARAMETER',
+    NonBulkifiedInvocable = 'NON_BULKIFIED_INVOCABLE'
 }
 
 /**
@@ -23,7 +26,10 @@ export const AntiPatternSeverity: Record<AntiPatternType, vscode.DiagnosticSever
     [AntiPatternType.DMLInLoopViaMethod]: vscode.DiagnosticSeverity.Error,
     [AntiPatternType.HardcodedId]: vscode.DiagnosticSeverity.Warning,
     [AntiPatternType.MissingLimit]: vscode.DiagnosticSeverity.Warning,
-    [AntiPatternType.UntestedField]: vscode.DiagnosticSeverity.Warning
+    [AntiPatternType.UntestedField]: vscode.DiagnosticSeverity.Warning,
+    [AntiPatternType.RecordTypeQuery]: vscode.DiagnosticSeverity.Warning,
+    [AntiPatternType.SingleSObjectParameter]: vscode.DiagnosticSeverity.Warning,
+    [AntiPatternType.NonBulkifiedInvocable]: vscode.DiagnosticSeverity.Error
 };
 
 /**
@@ -56,6 +62,7 @@ export interface LoopInfo {
 export interface SOQLInfo {
     query: string;
     line: number;
+    endLine: number;
     startChar: number;
     endChar: number;
     hasLimit: boolean;
@@ -66,6 +73,28 @@ export interface SOQLInfo {
  */
 export interface DMLInfo {
     operation: 'insert' | 'update' | 'delete' | 'upsert' | 'merge' | 'undelete';
+    line: number;
+    startChar: number;
+    endChar: number;
+    targetVariable?: string;
+}
+
+/**
+ * Represents a method parameter
+ */
+export interface MethodParameter {
+    name: string;
+    type: string;
+    baseType: string;
+    isCollection: boolean;
+    isSObject: boolean;
+}
+
+/**
+ * Represents a method annotation
+ */
+export interface MethodAnnotation {
+    name: string;
     line: number;
     startChar: number;
     endChar: number;
@@ -83,6 +112,8 @@ export interface MethodInfo {
     containsSOQL: SOQLInfo[];
     containsDML: DMLInfo[];
     callsMethodsNames: string[];
+    parameters: MethodParameter[];
+    annotations: MethodAnnotation[];
 }
 
 /**
@@ -128,6 +159,8 @@ export interface ExtensionConfig {
     detectMissingLimits: boolean;
     followMethodCalls: boolean;
     detectUntestedFields: boolean;
+    detectRecordTypeQueries: boolean;
+    detectNonBulkifiedMethods: boolean;
 }
 
 /**

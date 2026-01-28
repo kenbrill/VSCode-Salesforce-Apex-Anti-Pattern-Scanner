@@ -15,6 +15,9 @@ A Visual Studio Code extension that detects common Apex anti-patterns in real-ti
 | Hardcoded IDs | Warning | Detects hardcoded Salesforce record IDs that break between environments |
 | Missing LIMIT | Warning | Detects SOQL queries without a `LIMIT` clause (disabled by default) |
 | Untested Fields | Warning | Detects fields referenced in source classes that are not used in corresponding test classes |
+| RecordType Query | Warning | Detects SOQL queries on RecordType object and suggests using Schema methods instead |
+| Single SObject Parameter | Warning | Detects methods that accept a single SObject and perform DML on it |
+| Non-Bulkified Invocable | Error | Detects `@InvocableMethod` methods that don't accept a List parameter |
 
 ### Real-Time Analysis
 
@@ -63,6 +66,8 @@ Configure the extension in VS Code settings (`Ctrl+,` / `Cmd+,`):
 | `sfAntipattern.detectMissingLimits` | boolean | `false` | Detect SOQL queries without LIMIT clause |
 | `sfAntipattern.followMethodCalls` | boolean | `true` | Follow method calls to detect SOQL/DML in called methods |
 | `sfAntipattern.detectUntestedFields` | boolean | `true` | Detect fields in source classes not referenced in test classes |
+| `sfAntipattern.detectRecordTypeQueries` | boolean | `true` | Detect SOQL queries on RecordType and suggest Schema methods |
+| `sfAntipattern.detectNonBulkifiedMethods` | boolean | `true` | Detect single SObject parameters with DML and non-bulkified @InvocableMethod |
 
 ### Example settings.json
 
@@ -151,6 +156,76 @@ private class MyClassTest {
 ```
 
 The scanner will flag `Account_Billing_Country__c` and `Sales_Region_Override__c` as untested fields, reminding you to add test cases that verify these conditions work correctly.
+
+### RecordType Query (Warning)
+
+SOQL queries on the RecordType object should be replaced with Schema methods:
+
+```apex
+// BAD - Uses SOQL (counts against limits)
+Map<String, Id> recordTypeMap = new Map<String, Id>();
+for (RecordType rt : [SELECT Id, Name FROM RecordType WHERE SObjectType = 'Case']) {
+    recordTypeMap.put(rt.Name, rt.Id);
+}
+
+// GOOD - Uses Schema (cached, no SOQL limits)
+Map<String, Id> recordTypeMap = new Map<String, Id>();
+for (Schema.RecordTypeInfo rtInfo : Schema.SObjectType.Case.getRecordTypeInfosByDeveloperName().values()) {
+    if (rtInfo.isActive()) {
+        recordTypeMap.put(rtInfo.getDeveloperName(), rtInfo.getRecordTypeId());
+    }
+}
+
+// GOOD - Single RecordType lookup
+Id supportRecordTypeId = Schema.SObjectType.Case.getRecordTypeInfosByDeveloperName()
+    .get('Support').getRecordTypeId();
+```
+
+### Single SObject Parameter (Warning)
+
+Methods that accept a single SObject and perform DML should be bulkified:
+
+```apex
+// BAD - Will trigger a warning
+public void saveAccount(Account acc) {
+    insert acc;  // DML on single record
+}
+
+// GOOD - Accept a List for bulk processing
+public void saveAccounts(List<Account> accounts) {
+    insert accounts;
+}
+```
+
+### Non-Bulkified Invocable (Error)
+
+`@InvocableMethod` methods must accept a List parameter because they receive bulk input from Flow:
+
+```apex
+// BAD - Will trigger an error
+@InvocableMethod(label='Create Account')
+public static void createAccount(Account acc) {
+    insert acc;
+}
+
+// BAD - Will trigger an error (non-List collection)
+@InvocableMethod(label='Create Account')
+public static void createAccount(Set<String> names) {
+    // ...
+}
+
+// GOOD - Accepts List parameter
+@InvocableMethod(label='Create Accounts')
+public static void createAccounts(List<Account> accounts) {
+    insert accounts;
+}
+
+// GOOD - Using request wrapper class
+@InvocableMethod(label='Create Accounts')
+public static List<Result> createAccounts(List<Request> requests) {
+    // Process requests in bulk
+}
+```
 
 ## Why These Patterns Matter
 

@@ -6,8 +6,25 @@ import {
     MethodInfo,
     MethodCallInfo,
     HardcodedIdInfo,
-    FieldReferenceInfo
+    FieldReferenceInfo,
+    MethodParameter,
+    MethodAnnotation
 } from '../types';
+
+/**
+ * Standard Salesforce SObject types
+ */
+const STANDARD_SOBJECTS = new Set([
+    'Account', 'Contact', 'Lead', 'Opportunity', 'Case', 'Task', 'Event',
+    'Campaign', 'User', 'Profile', 'UserRole', 'Group', 'Asset', 'Contract',
+    'Order', 'OrderItem', 'Product2', 'Pricebook2', 'PricebookEntry',
+    'Quote', 'QuoteLineItem', 'Solution', 'CampaignMember', 'OpportunityLineItem',
+    'OpportunityContactRole', 'AccountContactRole', 'CaseComment', 'FeedItem',
+    'ContentDocument', 'ContentVersion', 'Attachment', 'Note', 'Document',
+    'EmailMessage', 'EmailTemplate', 'Folder', 'Report', 'Dashboard',
+    'RecordType', 'BusinessHours', 'Holiday', 'PermissionSet', 'PermissionSetAssignment',
+    'SObject'
+]);
 
 /**
  * Parser for Apex code to extract loops, SOQL, DML, methods, etc.
@@ -181,14 +198,16 @@ export class ApexParser {
 
         while ((match = bracketPattern.exec(this.text)) !== null) {
             const query = match[1];
-            const position = this.getLineAndChar(match.index);
+            const startPosition = this.getLineAndChar(match.index);
+            const endPosition = this.getLineAndChar(match.index + match[0].length);
             const hasLimit = /\bLIMIT\s+\d+/i.test(query);
 
             queries.push({
                 query: query,
-                line: position.line,
-                startChar: position.char,
-                endChar: position.char + match[0].length,
+                line: startPosition.line,
+                endLine: endPosition.line,
+                startChar: startPosition.char,
+                endChar: endPosition.char,
                 hasLimit: hasLimit
             });
         }
@@ -201,6 +220,7 @@ export class ApexParser {
             queries.push({
                 query: 'Database.query(...)',
                 line: position.line,
+                endLine: position.line,
                 startChar: position.char,
                 endChar: position.char + match[0].length,
                 hasLimit: true // Assume true since we can't check dynamic queries
@@ -219,7 +239,7 @@ export class ApexParser {
 
         for (const keyword of dmlKeywords) {
             // Match DML keyword followed by variable/expression (not in comments or strings)
-            const pattern = new RegExp(`\\b(${keyword})\\s+[^;]+;`, 'gi');
+            const pattern = new RegExp(`\\b(${keyword})\\s+([^;]+);`, 'gi');
             let match;
 
             while ((match = pattern.exec(this.text)) !== null) {
@@ -236,18 +256,25 @@ export class ApexParser {
                     continue;
                 }
 
+                // Extract target variable name
+                const targetExpr = match[2].trim();
+                // Get the first word as the variable name (handles expressions like "accounts" or "new Account()")
+                const targetMatch = targetExpr.match(/^(\w+)/);
+                const targetVariable = targetMatch ? targetMatch[1] : undefined;
+
                 operations.push({
                     operation: keyword as DMLInfo['operation'],
                     line: position.line,
                     startChar: position.char,
-                    endChar: position.char + match[0].length
+                    endChar: position.char + match[0].length,
+                    targetVariable: targetVariable
                 });
             }
         }
 
         // Also detect Database.insert(), Database.update(), etc.
         for (const keyword of dmlKeywords) {
-            const pattern = new RegExp(`Database\\.${keyword}\\s*\\(`, 'gi');
+            const pattern = new RegExp(`Database\\.${keyword}\\s*\\(([^)]+)\\)`, 'gi');
             let match;
 
             while ((match = pattern.exec(this.text)) !== null) {
@@ -257,11 +284,18 @@ export class ApexParser {
                     continue;
                 }
 
+                // Extract target variable from Database.operation(target, ...)
+                const argsStr = match[1].trim();
+                const firstArg = argsStr.split(',')[0].trim();
+                const targetMatch = firstArg.match(/^(\w+)/);
+                const targetVariable = targetMatch ? targetMatch[1] : undefined;
+
                 operations.push({
                     operation: keyword as DMLInfo['operation'],
                     line: position.line,
                     startChar: position.char,
-                    endChar: position.char + match[0].length
+                    endChar: position.char + match[0].length,
+                    targetVariable: targetVariable
                 });
             }
         }
@@ -277,11 +311,13 @@ export class ApexParser {
 
         // Pattern to match method definitions
         // Handles: public void methodName(), private static String getX(), etc.
-        const methodPattern = /(?:(?:public|private|protected|global)\s+)?(?:(?:static|virtual|abstract|override)\s+)*(?:\w+(?:<[\w,\s]+>)?)\s+(\w+)\s*\([^)]*\)\s*\{/gi;
+        // Captures: method name and parameter string
+        const methodPattern = /(?:(?:public|private|protected|global)\s+)?(?:(?:static|virtual|abstract|override)\s+)*(?:\w+(?:<[\w,\s]+>)?)\s+(\w+)\s*\(([^)]*)\)\s*\{/gi;
 
         let match;
         while ((match = methodPattern.exec(this.text)) !== null) {
             const methodName = match[1];
+            const paramString = match[2];
             const startPosition = this.getLineAndChar(match.index);
 
             // Find the end of the method by counting braces
@@ -303,6 +339,12 @@ export class ApexParser {
                 calls: bodyParser.findMethodCallsInText(methodBody)
             };
 
+            // Parse method parameters
+            const parameters = this.parseMethodParameters(paramString);
+
+            // Find annotations before this method
+            const annotations = this.findMethodAnnotations(match.index);
+
             methods.push({
                 name: methodName,
                 startLine: startPosition.line,
@@ -311,7 +353,9 @@ export class ApexParser {
                 endChar: endPosition.char,
                 containsSOQL: bodyParsed.soql,
                 containsDML: bodyParsed.dml,
-                callsMethodsNames: bodyParsed.calls
+                callsMethodsNames: bodyParsed.calls,
+                parameters: parameters,
+                annotations: annotations
             });
         }
 
@@ -588,12 +632,20 @@ export class ApexParser {
         const fields: FieldReferenceInfo[] = [];
         const seenFields = new Set<string>();
 
+        // First, identify "bulk query" ranges (SOQL with >15 fields) to skip
+        const bulkQueryRanges = this.findBulkQueryRanges();
+
         // Pattern 1: Custom fields with __c suffix (e.g., Account_Billing_Country__c, My_Field__c)
         const customFieldPattern = /\b(\w+__c)\b/gi;
         let match;
 
         while ((match = customFieldPattern.exec(this.text)) !== null) {
             const fieldName = match[1];
+
+            // Skip if inside a bulk query
+            if (this.isInRanges(match.index, bulkQueryRanges)) {
+                continue;
+            }
 
             // Skip if in string or comment (but allow in SOQL which uses brackets)
             if (this.isInStringOrComment(match.index) && !this.isInSOQLBrackets(match.index)) {
@@ -622,6 +674,11 @@ export class ApexParser {
         while ((match = relationshipPattern.exec(this.text)) !== null) {
             const objectName = match[1];
             const fieldName = match[2];
+
+            // Skip if inside a bulk query
+            if (this.isInRanges(match.index, bulkQueryRanges)) {
+                continue;
+            }
 
             // Skip common non-field patterns
             if (['System', 'Database', 'Test', 'Math', 'String', 'Integer', 'Date', 'DateTime', 'Decimal', 'Boolean', 'Schema', 'JSON', 'Type'].includes(objectName)) {
@@ -655,9 +712,15 @@ export class ApexParser {
             const selectClause = match[1];
             const fromObject = match[2];
             const restOfQuery = match[3] || '';
+            const soqlStartIndex = match.index;
 
             // Extract fields from SELECT clause
             const selectFields = selectClause.split(',').map(f => f.trim());
+
+            // Skip "bulk select" queries with many fields (likely data sync/ETL)
+            if (selectFields.length > 15) {
+                continue;
+            }
             for (const field of selectFields) {
                 // Handle relationship fields like Account.Name
                 const fieldParts = field.split('.');
@@ -667,13 +730,14 @@ export class ApexParser {
                     const normalizedName = actualField.toLowerCase();
                     if (!seenFields.has(normalizedName) && !this.isSOQLKeyword(actualField)) {
                         seenFields.add(normalizedName);
-                        const position = this.getLineAndChar(match.index);
+                        // Find the actual position of this field in the text
+                        const fieldPosition = this.findFieldPosition(actualField, soqlStartIndex);
                         fields.push({
                             fieldName: actualField,
                             objectName: fieldParts.length > 1 ? fieldParts[fieldParts.length - 2] : fromObject,
-                            line: position.line,
-                            startChar: position.char,
-                            endChar: position.char + actualField.length
+                            line: fieldPosition.line,
+                            startChar: fieldPosition.startChar,
+                            endChar: fieldPosition.endChar
                         });
                     }
                 }
@@ -695,13 +759,14 @@ export class ApexParser {
                         const normalizedName = actualField.toLowerCase();
                         if (!seenFields.has(normalizedName)) {
                             seenFields.add(normalizedName);
-                            const position = this.getLineAndChar(match.index);
+                            // Find the actual position of this field in the text
+                            const fieldPosition = this.findFieldPosition(actualField, soqlStartIndex);
                             fields.push({
                                 fieldName: actualField,
                                 objectName: fieldParts.length > 1 ? fieldParts[0] : fromObject,
-                                line: position.line,
-                                startChar: position.char,
-                                endChar: position.char + actualField.length
+                                line: fieldPosition.line,
+                                startChar: fieldPosition.startChar,
+                                endChar: fieldPosition.endChar
                             });
                         }
                     }
@@ -710,6 +775,75 @@ export class ApexParser {
         }
 
         return fields;
+    }
+
+    /**
+     * Find ranges of "bulk queries" (SOQL with more than 15 fields in SELECT)
+     */
+    private findBulkQueryRanges(): Array<{ start: number; end: number }> {
+        const ranges: Array<{ start: number; end: number }> = [];
+        const soqlPattern = /\[\s*SELECT\s+([\s\S]*?)\s+FROM\s+\w+[\s\S]*?\]/gi;
+        let match;
+
+        while ((match = soqlPattern.exec(this.text)) !== null) {
+            const selectClause = match[1];
+            const fieldCount = selectClause.split(',').length;
+
+            if (fieldCount > 15) {
+                ranges.push({
+                    start: match.index,
+                    end: match.index + match[0].length
+                });
+            }
+        }
+
+        return ranges;
+    }
+
+    /**
+     * Check if a position falls within any of the given ranges
+     */
+    private isInRanges(position: number, ranges: Array<{ start: number; end: number }>): boolean {
+        for (const range of ranges) {
+            if (position >= range.start && position < range.end) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Find the actual position of a field name in the text, starting from a given offset
+     */
+    private findFieldPosition(fieldName: string, startOffset: number): { line: number; startChar: number; endChar: number } {
+        // Search for the field name starting from the given offset
+        const searchPattern = new RegExp(`\\b${fieldName}\\b`, 'gi');
+        searchPattern.lastIndex = startOffset;
+        const match = searchPattern.exec(this.text);
+
+        if (match) {
+            const position = this.getLineAndChar(match.index);
+            return {
+                line: position.line,
+                startChar: position.char,
+                endChar: position.char + fieldName.length
+            };
+        }
+
+        // Fallback: search from the beginning
+        searchPattern.lastIndex = 0;
+        const fallbackMatch = searchPattern.exec(this.text);
+        if (fallbackMatch) {
+            const position = this.getLineAndChar(fallbackMatch.index);
+            return {
+                line: position.line,
+                startChar: position.char,
+                endChar: position.char + fieldName.length
+            };
+        }
+
+        // If not found, return position 0
+        return { line: 0, startChar: 0, endChar: fieldName.length };
     }
 
     /**
@@ -727,6 +861,171 @@ export class ApexParser {
             'NEXT_QUARTER', 'THIS_YEAR', 'LAST_YEAR', 'NEXT_YEAR', 'ALL', 'ROWS'
         ];
         return keywords.includes(word.toUpperCase());
+    }
+
+    /**
+     * Check if a type is an SObject type
+     */
+    private isSObjectType(typeName: string): boolean {
+        // Remove any generic type parameters
+        const baseType = typeName.split('<')[0].trim();
+
+        // Check standard objects
+        if (STANDARD_SOBJECTS.has(baseType)) {
+            return true;
+        }
+
+        // Check custom objects (__c), custom metadata (__mdt), platform events (__e),
+        // external objects (__x), big objects (__b)
+        if (/__c$/i.test(baseType) || /__mdt$/i.test(baseType) ||
+            /__e$/i.test(baseType) || /__x$/i.test(baseType) || /__b$/i.test(baseType)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Parse a type string to detect if it's a collection and extract the base type
+     */
+    private parseCollectionType(typeStr: string): { isCollection: boolean; baseType: string } {
+        const trimmed = typeStr.trim();
+
+        // Check for List<Type>
+        const listMatch = trimmed.match(/^List\s*<\s*(.+)\s*>$/i);
+        if (listMatch) {
+            return { isCollection: true, baseType: listMatch[1].trim() };
+        }
+
+        // Check for Set<Type>
+        const setMatch = trimmed.match(/^Set\s*<\s*(.+)\s*>$/i);
+        if (setMatch) {
+            return { isCollection: true, baseType: setMatch[1].trim() };
+        }
+
+        // Check for Map<Key, Value> - extract value type as base
+        const mapMatch = trimmed.match(/^Map\s*<\s*[^,]+\s*,\s*(.+)\s*>$/i);
+        if (mapMatch) {
+            return { isCollection: true, baseType: mapMatch[1].trim() };
+        }
+
+        // Check for array notation Type[]
+        const arrayMatch = trimmed.match(/^(.+)\[\s*\]$/);
+        if (arrayMatch) {
+            return { isCollection: true, baseType: arrayMatch[1].trim() };
+        }
+
+        return { isCollection: false, baseType: trimmed };
+    }
+
+    /**
+     * Split parameter string respecting nested generics
+     */
+    private splitParameters(paramString: string): string[] {
+        const params: string[] = [];
+        let current = '';
+        let depth = 0;
+
+        for (const char of paramString) {
+            if (char === '<') {
+                depth++;
+                current += char;
+            } else if (char === '>') {
+                depth--;
+                current += char;
+            } else if (char === ',' && depth === 0) {
+                if (current.trim()) {
+                    params.push(current.trim());
+                }
+                current = '';
+            } else {
+                current += char;
+            }
+        }
+
+        if (current.trim()) {
+            params.push(current.trim());
+        }
+
+        return params;
+    }
+
+    /**
+     * Parse method parameters from a parameter string
+     */
+    private parseMethodParameters(paramString: string): MethodParameter[] {
+        const params: MethodParameter[] = [];
+        const paramList = this.splitParameters(paramString);
+
+        for (const param of paramList) {
+            // Match: [final] Type paramName
+            const match = param.match(/^(?:final\s+)?(.+?)\s+(\w+)$/);
+            if (match) {
+                const fullType = match[1].trim();
+                const paramName = match[2];
+                const { isCollection, baseType } = this.parseCollectionType(fullType);
+                const isSObject = this.isSObjectType(baseType);
+
+                params.push({
+                    name: paramName,
+                    type: fullType,
+                    baseType: baseType,
+                    isCollection: isCollection,
+                    isSObject: isSObject
+                });
+            }
+        }
+
+        return params;
+    }
+
+    /**
+     * Find annotations before a method definition
+     */
+    private findMethodAnnotations(methodStartIndex: number): MethodAnnotation[] {
+        const annotations: MethodAnnotation[] = [];
+
+        // Look backwards from the method start to find annotations
+        // We need to search the text before the method
+        const textBefore = this.text.substring(0, methodStartIndex);
+
+        // Find the last non-whitespace content before the method
+        // Annotations should be on the lines immediately before
+        const lines = textBefore.split('\n');
+
+        // Start from the last line and work backwards
+        for (let i = lines.length - 1; i >= 0; i--) {
+            const line = lines[i].trim();
+
+            // Skip empty lines
+            if (!line) {
+                continue;
+            }
+
+            // Check for annotation
+            const annotationMatch = line.match(/^@(\w+)(?:\s*\([^)]*\))?/);
+            if (annotationMatch) {
+                const annotationName = annotationMatch[1];
+                const lineIndex = i;
+                const lineStart = lines.slice(0, i).join('\n').length + (i > 0 ? 1 : 0);
+                const position = this.getLineAndChar(lineStart);
+
+                annotations.push({
+                    name: annotationName,
+                    line: position.line,
+                    startChar: lines[i].indexOf('@'),
+                    endChar: lines[i].indexOf('@') + annotationMatch[0].length
+                });
+            } else {
+                // If we hit a non-annotation, non-empty line, stop looking
+                // (unless it's a modifier like public, private, etc.)
+                if (!/^(public|private|protected|global|static|virtual|abstract|override|with\s+sharing|without\s+sharing|inherited\s+sharing)/.test(line)) {
+                    break;
+                }
+            }
+        }
+
+        return annotations;
     }
 
     /**

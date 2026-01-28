@@ -2,7 +2,7 @@
   "name": "salesforce-antipattern-scanner",
   "displayName": "Salesforce Apex Anti-Pattern Scanner",
   "description": "Detects common Apex anti-patterns like SOQL/DML in loops, hardcoded IDs, and missing LIMIT clauses",
-  "version": "0.0.1",
+  "version": "0.2.8",
   "publisher": "your-publisher-name",
   "engines": {
     "vscode": "^1.85.0"
@@ -68,6 +68,16 @@
           "type": "boolean",
           "default": true,
           "description": "Detect fields referenced in source classes that are not used in corresponding test classes"
+        },
+        "sfAntipattern.detectRecordTypeQueries": {
+          "type": "boolean",
+          "default": true,
+          "description": "Detect SOQL queries on RecordType and suggest using Schema methods instead"
+        },
+        "sfAntipattern.detectNonBulkifiedMethods": {
+          "type": "boolean",
+          "default": true,
+          "description": "Detect methods that accept single SObjects with DML, and @InvocableMethod without bulk parameters"
         }
       }
     }
