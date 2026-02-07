@@ -66,6 +66,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(scanFileCommand, scanWorkspaceCommand);
 
     // Scan on save (if enabled)
+    // i might remove this later, not sure if I want it
     const onSaveDisposable = vscode.workspace.onDidSaveTextDocument((document) => {
         const config = getConfig();
         if (config.enableOnSave && document.languageId === 'apex') {
@@ -121,7 +122,10 @@ function getConfig(): ExtensionConfig {
         followMethodCalls: config.get<boolean>('followMethodCalls', true),
         detectUntestedFields: config.get<boolean>('detectUntestedFields', true),
         detectRecordTypeQueries: config.get<boolean>('detectRecordTypeQueries', true),
-        detectNonBulkifiedMethods: config.get<boolean>('detectNonBulkifiedMethods', true)
+        detectNonBulkifiedMethods: config.get<boolean>('detectNonBulkifiedMethods', true),
+        detectTriggerRecursion: config.get<boolean>('detectTriggerRecursion', true),
+        detectDeeplyNestedCode: config.get<boolean>('detectDeeplyNestedCode', true),
+        maxNestingDepth: config.get<number>('maxNestingDepth', 3)
     };
 }
 

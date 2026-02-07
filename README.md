@@ -18,6 +18,8 @@ A Visual Studio Code extension that detects common Apex anti-patterns in real-ti
 | RecordType Query | Warning | Detects SOQL queries on RecordType object and suggests using Schema methods instead |
 | Single SObject Parameter | Warning | Detects methods that accept a single SObject and perform DML on it |
 | Non-Bulkified Invocable | Error | Detects `@InvocableMethod` methods that don't accept a List parameter |
+| Trigger Without Recursion Guard | Warning | Detects triggers with DML that lack recursion protection |
+| Deeply Nested Code | Warning | Detects code nested more than 3 levels deep (configurable) |
 
 ### Real-Time Analysis
 
@@ -68,6 +70,9 @@ Configure the extension in VS Code settings (`Ctrl+,` / `Cmd+,`):
 | `sfAntipattern.detectUntestedFields` | boolean | `true` | Detect fields in source classes not referenced in test classes |
 | `sfAntipattern.detectRecordTypeQueries` | boolean | `true` | Detect SOQL queries on RecordType and suggest Schema methods |
 | `sfAntipattern.detectNonBulkifiedMethods` | boolean | `true` | Detect single SObject parameters with DML and non-bulkified @InvocableMethod |
+| `sfAntipattern.detectTriggerRecursion` | boolean | `true` | Detect triggers with DML that lack recursion protection |
+| `sfAntipattern.detectDeeplyNestedCode` | boolean | `true` | Detect code nested too deeply |
+| `sfAntipattern.maxNestingDepth` | number | `3` | Maximum nesting depth before warning (1-10) |
 
 ### Example settings.json
 
@@ -226,6 +231,109 @@ public static List<Result> createAccounts(List<Request> requests) {
     // Process requests in bulk
 }
 ```
+
+### Trigger Without Recursion Guard (Warning)
+
+Triggers that perform DML can cause infinite recursion if they update records that re-fire the same trigger:
+
+```apex
+// BAD - Will trigger a warning (no recursion protection)
+trigger AccountTrigger on Account (after insert, after update) {
+    List<Account> toUpdate = new List<Account>();
+    for (Account acc : Trigger.new) {
+        toUpdate.add(new Account(Id = acc.Id, Description = 'Updated'));
+    }
+    update toUpdate; // This update will re-fire the trigger!
+}
+
+// GOOD - Using a recursion guard
+public class TriggerRecursionHandler {
+    public static Boolean isFirstRun = true;
+}
+
+trigger AccountTrigger on Account (after insert, after update) {
+    if (!TriggerRecursionHandler.isFirstRun) {
+        return;
+    }
+    TriggerRecursionHandler.isFirstRun = false;
+
+    List<Account> toUpdate = new List<Account>();
+    for (Account acc : Trigger.new) {
+        toUpdate.add(new Account(Id = acc.Id, Description = 'Updated'));
+    }
+    update toUpdate;
+}
+
+// GOOD - Using Set to track processed IDs
+public class TriggerRecursionHandler {
+    private static Set<Id> processedIds = new Set<Id>();
+
+    public static Boolean hasProcessed(Id recordId) {
+        return processedIds.contains(recordId);
+    }
+
+    public static void markProcessed(Set<Id> recordIds) {
+        processedIds.addAll(recordIds);
+    }
+}
+
+trigger AccountTrigger on Account (after update) {
+    List<Account> toUpdate = new List<Account>();
+    for (Account acc : Trigger.new) {
+        if (TriggerRecursionHandler.hasProcessed(acc.Id)) {
+            continue;
+        }
+        toUpdate.add(new Account(Id = acc.Id, Description = 'Updated'));
+    }
+
+    if (!toUpdate.isEmpty()) {
+        TriggerRecursionHandler.markProcessed(new Map<Id, Account>(toUpdate).keySet());
+        update toUpdate;
+    }
+}
+```
+
+### Deeply Nested Code (Warning)
+
+Code that is nested too deeply is hard to read and maintain. Extract inner logic to separate methods:
+
+```apex
+// BAD - Will trigger a warning (4 levels deep)
+public void processAccounts(List<Account> accounts) {
+    for (Account acc : accounts) {                    // Level 1
+        if (acc.IsActive__c) {                        // Level 2
+            for (Contact con : acc.Contacts) {        // Level 3
+                if (con.Email != null) {              // Level 4 - WARNING!
+                    // Complex logic here
+                }
+            }
+        }
+    }
+}
+
+// GOOD - Extract to separate methods
+public void processAccounts(List<Account> accounts) {
+    for (Account acc : accounts) {
+        if (acc.IsActive__c) {
+            processAccountContacts(acc.Contacts);
+        }
+    }
+}
+
+private void processAccountContacts(List<Contact> contacts) {
+    for (Contact con : contacts) {
+        if (con.Email != null) {
+            processContactEmail(con);
+        }
+    }
+}
+
+private void processContactEmail(Contact con) {
+    // Logic here - now at a reasonable nesting level
+}
+```
+
+You can configure the maximum nesting depth with `sfAntipattern.maxNestingDepth` (default: 3).
 
 ## Why These Patterns Matter
 

@@ -2,7 +2,7 @@
   "name": "salesforce-antipattern-scanner",
   "displayName": "Salesforce Apex Anti-Pattern Scanner",
   "description": "Detects common Apex anti-patterns like SOQL/DML in loops, hardcoded IDs, and missing LIMIT clauses",
-  "version": "0.2.8",
+  "version": "0.3.2",
   "publisher": "your-publisher-name",
   "engines": {
     "vscode": "^1.85.0"
@@ -78,6 +78,23 @@
           "type": "boolean",
           "default": true,
           "description": "Detect methods that accept single SObjects with DML, and @InvocableMethod without bulk parameters"
+        },
+        "sfAntipattern.detectTriggerRecursion": {
+          "type": "boolean",
+          "default": true,
+          "description": "Detect triggers with DML operations that lack recursion protection"
+        },
+        "sfAntipattern.detectDeeplyNestedCode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Detect code that is nested too deeply (loops, if statements, try-catch)"
+        },
+        "sfAntipattern.maxNestingDepth": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Maximum allowed nesting depth before warning (default: 3)"
         }
       }
     }

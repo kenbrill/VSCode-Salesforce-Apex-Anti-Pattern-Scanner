@@ -51,6 +51,14 @@ export class AntiPatternAnalyzer {
             issues.push(...this.detectNonBulkifiedInvocable(parsed));
         }
 
+        if (this.config.detectTriggerRecursion) {
+            issues.push(...this.detectTriggerWithoutRecursionGuard(parsed));
+        }
+
+        if (this.config.detectDeeplyNestedCode) {
+            issues.push(...this.detectDeeplyNestedCode(parsed));
+        }
+
         return issues;
     }
 
@@ -357,7 +365,7 @@ export class AntiPatternAnalyzer {
             if (/\bFROM\s+RecordType\b/i.test(soql.query)) {
                 issues.push({
                     type: AntiPatternType.RecordTypeQuery,
-                    message: `Avoid SOQL on RecordType. Use Schema.SObjectType.YourObject.getRecordTypeInfosByDeveloperName() instead - it's cached and doesn't count against SOQL limits.`,
+                    message: `Avoid SOQL on RecordType. Use Schema.SObjectType.YourSFObject.getRecordTypeInfosByDeveloperName() instead - it's cached and doesn't count against SOQL limits.`,
                     range: new vscode.Range(
                         soql.line, soql.startChar,
                         soql.endLine, soql.endChar
@@ -455,6 +463,70 @@ export class AntiPatternAnalyzer {
     }
 
     /**
+     * Detect triggers with DML that lack recursion protection
+     */
+    private detectTriggerWithoutRecursionGuard(parsed: ParsedApexFile): AntiPatternIssue[] {
+        const issues: AntiPatternIssue[] = [];
+
+        // Only check trigger files
+        if (!parsed.isTrigger || !parsed.triggerInfo) {
+            return issues;
+        }
+
+        const trigger = parsed.triggerInfo;
+
+        // Only flag if trigger contains DML and has no recursion guard
+        if (trigger.containsDML.length > 0 && !trigger.hasRecursionGuard) {
+            // Check if it's an "after" trigger with update/insert DML (most likely to cause recursion)
+            const hasAfterEvent = trigger.events.some(e => e.includes('after'));
+            const hasDMLThatCanCauseRecursion = trigger.containsDML.some(
+                dml => ['insert', 'update', 'upsert'].includes(dml.operation)
+            );
+
+            if (hasAfterEvent && hasDMLThatCanCauseRecursion) {
+                const dmlOperations = trigger.containsDML
+                    .map(d => d.operation)
+                    .filter((v, i, a) => a.indexOf(v) === i)
+                    .join(', ');
+
+                issues.push({
+                    type: AntiPatternType.TriggerWithoutRecursionGuard,
+                    message: `Trigger '${trigger.name}' contains DML (${dmlOperations}) without recursion protection. This may cause infinite recursion. Consider using a static variable to prevent re-entry.`,
+                    range: new vscode.Range(
+                        trigger.startLine, trigger.startChar,
+                        trigger.startLine, trigger.startChar + trigger.name.length + 10
+                    )
+                });
+            }
+        }
+
+        return issues;
+    }
+
+    /**
+     * Detect deeply nested code blocks
+     */
+    private detectDeeplyNestedCode(parsed: ParsedApexFile): AntiPatternIssue[] {
+        const issues: AntiPatternIssue[] = [];
+        const maxDepth = this.config.maxNestingDepth || 3;
+
+        for (const nesting of parsed.deepNestings) {
+            if (nesting.depth > maxDepth) {
+                issues.push({
+                    type: AntiPatternType.DeeplyNestedCode,
+                    message: `Code is nested ${nesting.depth} levels deep (${nesting.blockType}). Consider extracting to a separate method to improve readability. Maximum recommended: ${maxDepth} levels.`,
+                    range: new vscode.Range(
+                        nesting.line, nesting.startChar,
+                        nesting.line, nesting.endChar + 10
+                    )
+                });
+            }
+        }
+
+        return issues;
+    }
+
+    /**
      * Check if a line is inside a loop
      */
     private isInLoop(line: number, loop: LoopInfo): boolean {
@@ -467,9 +539,14 @@ export class AntiPatternAnalyzer {
     analyzeUntestedFields(sourceParsed: ParsedApexFile, testParsed: ParsedApexFile): AntiPatternIssue[] {
         const issues: AntiPatternIssue[] = [];
 
-        // Get all field names from source class (normalized to lowercase)
+        // Get all CUSTOM field names from source class (only __c fields)
+        // Standard fields are well-tested by Salesforce and don't need coverage warnings
         const sourceFields = new Map<string, { fieldName: string; line: number; startChar: number; endChar: number }>();
         for (const field of sourceParsed.fieldReferences) {
+            // Only track custom fields (ending in __c)
+            if (!field.fieldName.toLowerCase().endsWith('__c')) {
+                continue;
+            }
             const normalizedName = field.fieldName.toLowerCase();
             if (!sourceFields.has(normalizedName)) {
                 sourceFields.set(normalizedName, {
@@ -487,24 +564,17 @@ export class AntiPatternAnalyzer {
             testFields.add(field.fieldName.toLowerCase());
         }
 
-        // Find fields in source that aren't in test
+        // Find custom fields in source that aren't in test
         for (const [normalizedName, fieldInfo] of sourceFields) {
             if (!testFields.has(normalizedName)) {
-                // Skip relationship fields (ending in __r)
+                // Skip relationship fields (ending in __r) - shouldn't happen but just in case
                 if (normalizedName.endsWith('__r')) {
-                    continue;
-                }
-
-                // Skip standard fields that are commonly not explicitly tested
-                const skipFields = ['id', 'createddate', 'lastmodifieddate',
-                    'lastmodifiedbyid', 'systemmodstamp', 'isdeleted'];
-                if (skipFields.includes(normalizedName)) {
                     continue;
                 }
 
                 issues.push({
                     type: AntiPatternType.UntestedField,
-                    message: `Field '${fieldInfo.fieldName}' is referenced in source class but not in test class. Consider adding test coverage for this field.`,
+                    message: `Custom field '${fieldInfo.fieldName}' is referenced in source class but not in test class. Consider adding test coverage for this field.`,
                     range: new vscode.Range(
                         fieldInfo.line, fieldInfo.startChar,
                         fieldInfo.line, fieldInfo.endChar

@@ -8,11 +8,16 @@ import {
     HardcodedIdInfo,
     FieldReferenceInfo,
     MethodParameter,
-    MethodAnnotation
+    MethodAnnotation,
+    TriggerInfo,
+    DeepNestingInfo
 } from '../types';
 
 /**
  * Standard Salesforce SObject types
+ * todo: move this to either a call to SF (sf describe), and search 
+ * requiring the 'Custom Objects' being vailable or this, a static 
+ * list that is updated periodically
  */
 const STANDARD_SOBJECTS = new Set([
     'Account', 'Contact', 'Lead', 'Opportunity', 'Case', 'Task', 'Event',
@@ -42,6 +47,7 @@ export class ApexParser {
      * Parse the Apex file and extract all relevant information
      */
     parse(): ParsedApexFile {
+        const triggerInfo = this.findTriggerInfo();
         return {
             loops: this.findLoops(),
             soqlQueries: this.findSOQLQueries(),
@@ -51,7 +57,10 @@ export class ApexParser {
             hardcodedIds: this.findHardcodedIds(),
             fieldReferences: this.findFieldReferences(),
             isTestClass: this.checkIsTestClass(),
-            className: this.findClassName()
+            className: this.findClassName(),
+            isTrigger: triggerInfo !== null,
+            triggerInfo: triggerInfo ?? undefined,
+            deepNestings: this.findDeepNestings()
         };
     }
 
@@ -118,7 +127,7 @@ export class ApexParser {
                 continue;
             }
 
-            // Track braces
+            // Track braces via the brett method
             if (char === '{') {
                 braceDepth++;
             } else if (char === '}') {
@@ -312,6 +321,8 @@ export class ApexParser {
         // Pattern to match method definitions
         // Handles: public void methodName(), private static String getX(), etc.
         // Captures: method name and parameter string
+        // Represents the most complex regex I haveever written
+        // test with https://regex101.com/
         const methodPattern = /(?:(?:public|private|protected|global)\s+)?(?:(?:static|virtual|abstract|override)\s+)*(?:\w+(?:<[\w,\s]+>)?)\s+(\w+)\s*\(([^)]*)\)\s*\{/gi;
 
         let match;
@@ -376,6 +387,7 @@ export class ApexParser {
             const methodName = match[1];
 
             // Skip common keywords that look like method calls
+            // kind of a hacky way to do this
             const skipKeywords = ['if', 'for', 'while', 'switch', 'catch', 'return', 'new', 'throw'];
             if (skipKeywords.includes(methodName.toLowerCase())) {
                 continue;
@@ -408,6 +420,7 @@ export class ApexParser {
             const methodName = match[1];
 
             // Skip common keywords
+            // kind of a hacky way to do this
             const skipKeywords = ['if', 'for', 'while', 'switch', 'catch', 'return', 'new', 'throw', 'class', 'interface'];
             if (skipKeywords.includes(methodName.toLowerCase())) {
                 continue;
@@ -426,7 +439,6 @@ export class ApexParser {
                 endChar: position.char + match[0].length
             });
         }
-
         return calls;
     }
 
@@ -474,6 +486,8 @@ export class ApexParser {
 
     /**
      * Find the matching closing brace for an opening brace
+     * An insane way to do a simple thing, run this past chatgpt someday
+     * to see if there is a better way
      */
     private findMatchingBrace(openBraceIndex: number): number {
         let depth = 1;
@@ -494,6 +508,7 @@ export class ApexParser {
             }
 
             // Handle comments
+            // I use this code in several places now, maybe refactor later
             if (!inString && !inBlockComment && char === '/' && nextChar === '/') {
                 inLineComment = true;
                 continue;
@@ -706,6 +721,7 @@ export class ApexParser {
         }
 
         // Pattern 3: Fields in SOQL SELECT clauses and WHERE clauses
+        // Only extract custom fields (__c) from SOQL - standard fields don't need tracking
         const soqlFieldPattern = /\[\s*SELECT\s+([\s\S]*?)\s+FROM\s+(\w+)([\s\S]*?)\]/gi;
 
         while ((match = soqlFieldPattern.exec(this.text)) !== null) {
@@ -726,9 +742,10 @@ export class ApexParser {
                 const fieldParts = field.split('.');
                 const actualField = fieldParts[fieldParts.length - 1];
 
-                if (actualField && /^[a-zA-Z_]\w*$/.test(actualField)) {
+                // Only track custom fields (__c) - standard fields don't need test coverage warnings
+                if (actualField && actualField.endsWith('__c')) {
                     const normalizedName = actualField.toLowerCase();
-                    if (!seenFields.has(normalizedName) && !this.isSOQLKeyword(actualField)) {
+                    if (!seenFields.has(normalizedName)) {
                         seenFields.add(normalizedName);
                         // Find the actual position of this field in the text
                         const fieldPosition = this.findFieldPosition(actualField, soqlStartIndex);
@@ -743,32 +760,27 @@ export class ApexParser {
                 }
             }
 
-            // Extract fields from WHERE clause
+            // Extract custom fields from WHERE clause
             const whereMatch = restOfQuery.match(/WHERE\s+([\s\S]*?)(?:ORDER|GROUP|LIMIT|$)/i);
             if (whereMatch) {
                 const whereClause = whereMatch[1];
-                // Find field references in WHERE clause
-                const whereFieldPattern = /\b(\w+(?:\.\w+)?)\s*(?:=|!=|<|>|<=|>=|LIKE|IN|NOT\s+IN)\s*/gi;
+                // Find custom field references in WHERE clause (only __c fields)
+                const whereFieldPattern = /\b(\w+__c)\s*(?:=|!=|<|>|<=|>=|LIKE|IN|NOT\s+IN)\s*/gi;
                 let whereField;
                 while ((whereField = whereFieldPattern.exec(whereClause)) !== null) {
                     const fieldRef = whereField[1];
-                    const fieldParts = fieldRef.split('.');
-                    const actualField = fieldParts[fieldParts.length - 1];
-
-                    if (actualField && !this.isSOQLKeyword(actualField)) {
-                        const normalizedName = actualField.toLowerCase();
-                        if (!seenFields.has(normalizedName)) {
-                            seenFields.add(normalizedName);
-                            // Find the actual position of this field in the text
-                            const fieldPosition = this.findFieldPosition(actualField, soqlStartIndex);
-                            fields.push({
-                                fieldName: actualField,
-                                objectName: fieldParts.length > 1 ? fieldParts[0] : fromObject,
-                                line: fieldPosition.line,
-                                startChar: fieldPosition.startChar,
-                                endChar: fieldPosition.endChar
-                            });
-                        }
+                    const normalizedName = fieldRef.toLowerCase();
+                    if (!seenFields.has(normalizedName)) {
+                        seenFields.add(normalizedName);
+                        // Find the actual position of this field in the text
+                        const fieldPosition = this.findFieldPosition(fieldRef, soqlStartIndex);
+                        fields.push({
+                            fieldName: fieldRef,
+                            objectName: fromObject,
+                            line: fieldPosition.line,
+                            startChar: fieldPosition.startChar,
+                            endChar: fieldPosition.endChar
+                        });
                     }
                 }
             }
@@ -1054,5 +1066,264 @@ export class ApexParser {
         }
 
         return inSOQL && bracketDepth > 0;
+    }
+
+    /**
+     * Find trigger definition and check for recursion guard
+     */
+    private findTriggerInfo(): TriggerInfo | null {
+        // Match trigger definition: trigger TriggerName on ObjectName (events) {
+        const triggerPattern = /\btrigger\s+(\w+)\s+on\s+(\w+)\s*\(([^)]+)\)\s*\{/i;
+        const match = triggerPattern.exec(this.text);
+
+        if (!match) {
+            return null;
+        }
+
+        const triggerName = match[1];
+        const objectName = match[2];
+        const eventsString = match[3];
+        const startPosition = this.getLineAndChar(match.index);
+
+        // Parse events (before insert, after update, etc.)
+        const events = eventsString.split(',').map(e => e.trim().toLowerCase());
+
+        // Find the end of the trigger by counting braces
+        const triggerStart = match.index + match[0].length - 1;
+        const triggerEnd = this.findMatchingBrace(triggerStart);
+
+        if (triggerEnd === -1) {
+            return null;
+        }
+
+        const endPosition = this.getLineAndChar(triggerEnd);
+        const triggerBody = this.text.substring(triggerStart, triggerEnd + 1);
+
+        // Find DML operations in the trigger body
+        const bodyParser = new ApexParser(triggerBody);
+        const dmlOperations = bodyParser.findDMLOperations();
+
+        // Check for recursion guard patterns
+        const hasRecursionGuard = this.detectRecursionGuard(triggerBody);
+
+        return {
+            name: triggerName,
+            objectName: objectName,
+            events: events,
+            startLine: startPosition.line,
+            endLine: endPosition.line,
+            startChar: startPosition.char,
+            endChar: endPosition.char,
+            containsDML: dmlOperations,
+            hasRecursionGuard: hasRecursionGuard
+        };
+    }
+
+    /**
+     * Detect if code contains a recursion guard pattern
+     */
+    private detectRecursionGuard(code: string): boolean {
+        // Pattern 1: Static boolean check - if (RecursionHandler.isFirstRun) or if (!hasRun)
+        const staticBooleanPattern = /\bif\s*\(\s*!?\s*\w+\s*\.\s*(isFirstRun|hasRun|isRunning|isExecuting|firstRun|hasExecuted|isRecursive|runOnce)\b/i;
+        if (staticBooleanPattern.test(code)) {
+            return true;
+        }
+
+        // Pattern 2: Static Set/Map check - if (!processedIds.contains(
+        const staticSetPattern = /\bif\s*\(\s*!?\s*\w+\s*\.\s*(contains|containsKey|hasProcessed|isProcessed|isEmpty)\s*\(/i;
+        if (staticSetPattern.test(code)) {
+            return true;
+        }
+
+        // Pattern 3: Direct static variable check - if (TriggerHandler.hasRun == false)
+        const staticEqualityPattern = /\bif\s*\(\s*\w+\s*\.\s*\w+\s*(==|!=)\s*(true|false)\s*\)/i;
+        if (staticEqualityPattern.test(code)) {
+            return true;
+        }
+
+        // Pattern 4: Trigger.isExecuting combined with custom flag
+        const triggerExecutingPattern = /Trigger\s*\.\s*isExecuting/i;
+        if (triggerExecutingPattern.test(code)) {
+            return true;
+        }
+
+        // Pattern 5: Early return with static check - return if already processed
+        const earlyReturnPattern = /\breturn\s*;\s*\}?\s*\n\s*\w+\s*\.\s*\w+\s*=/i;
+        if (earlyReturnPattern.test(code)) {
+            return true;
+        }
+
+        // Pattern 6: Class reference that looks like a recursion handler
+        const handlerClassPattern = /\b(RecursionHandler|TriggerRecursionHandler|RecursionControl|TriggerControl|RecursionGuard|TriggerGuard|RecursionPrevention)\b/i;
+        if (handlerClassPattern.test(code)) {
+            return true;
+        }
+
+        // Pattern 7: Setting a static variable at start (hasRun = true, isExecuting = true)
+        const setStaticPattern = /\b\w+\s*\.\s*(isFirstRun|hasRun|isRunning|isExecuting|firstRun|hasExecuted)\s*=\s*(true|false)\s*;/i;
+        if (setStaticPattern.test(code)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Find deeply nested code blocks
+     */
+    private findDeepNestings(): DeepNestingInfo[] {
+        const deepNestings: DeepNestingInfo[] = [];
+
+        // Track nesting using brace depth - this is more reliable
+        // We track the depth at each opening brace and report when we see
+        // control structures at deep levels
+
+        let inString = false;
+        let inLineComment = false;
+        let inBlockComment = false;
+        let stringChar = '';
+        let currentLine = 0;
+        let currentChar = 0;
+        let braceDepth = 0;
+
+        // Stack to track control structure depths with their brace level
+        const controlStack: Array<{ type: string; braceDepth: number; hasBrace: boolean }> = [];
+
+        // Track which lines we've already reported
+        const reportedLines = new Set<number>();
+
+        for (let i = 0; i < this.text.length; i++) {
+            const char = this.text[i];
+            const nextChar = this.text[i + 1] || '';
+            const prevChar = this.text[i - 1] || '';
+
+            // Track line and character position
+            if (char === '\n') {
+                currentLine++;
+                currentChar = 0;
+                inLineComment = false;
+                continue;
+            }
+            currentChar++;
+
+            // Handle comments
+            if (!inString && !inBlockComment && char === '/' && nextChar === '/') {
+                inLineComment = true;
+                continue;
+            }
+            if (!inString && !inLineComment && char === '/' && nextChar === '*') {
+                inBlockComment = true;
+                continue;
+            }
+            if (inBlockComment && char === '*' && nextChar === '/') {
+                inBlockComment = false;
+                i++;
+                continue;
+            }
+            if (inLineComment || inBlockComment) {
+                continue;
+            }
+
+            // Handle strings
+            if (!inString && (char === '"' || char === '\'')) {
+                inString = true;
+                stringChar = char;
+                continue;
+            }
+            if (inString && char === stringChar && prevChar !== '\\') {
+                inString = false;
+                continue;
+            }
+            if (inString) {
+                continue;
+            }
+
+            // Track braces
+            if (char === '{') {
+                braceDepth++;
+                // Mark any pending control structures as having a brace
+                for (let j = controlStack.length - 1; j >= 0; j--) {
+                    if (!controlStack[j].hasBrace && controlStack[j].braceDepth === braceDepth - 1) {
+                        controlStack[j].hasBrace = true;
+                        break;
+                    }
+                }
+            } else if (char === '}') {
+                // Pop any control structures at this brace level
+                while (controlStack.length > 0 &&
+                       controlStack[controlStack.length - 1].hasBrace &&
+                       controlStack[controlStack.length - 1].braceDepth === braceDepth - 1) {
+                    controlStack.pop();
+                }
+                braceDepth--;
+            }
+
+            // Handle semicolons - they end single-statement control structures
+            if (char === ';') {
+                // Pop any control structures without braces at current level
+                while (controlStack.length > 0 && !controlStack[controlStack.length - 1].hasBrace) {
+                    controlStack.pop();
+                }
+            }
+
+            // Look for control structure keywords
+            const textFromHere = this.text.substring(i);
+            let blockType: string | null = null;
+
+            // Match control structures
+            if (textFromHere.match(/^if\s*\(/i)) {
+                blockType = 'if';
+            } else if (textFromHere.match(/^else\s+if\s*\(/i)) {
+                // else if continues at same level, don't add
+                blockType = null;
+            } else if (textFromHere.match(/^else\b/i)) {
+                // else continues at same level
+                blockType = null;
+            } else if (textFromHere.match(/^for\s*\(/i)) {
+                blockType = 'for';
+            } else if (textFromHere.match(/^while\s*\(/i)) {
+                // Check if it's the while of a do-while (ends with semicolon)
+                if (!textFromHere.match(/^while\s*\([^)]*\)\s*;/i)) {
+                    blockType = 'while';
+                }
+            } else if (textFromHere.match(/^do\s*\{/i)) {
+                blockType = 'do-while';
+            } else if (textFromHere.match(/^try\s*\{/i)) {
+                blockType = 'try';
+            } else if (textFromHere.match(/^catch\s*\(/i)) {
+                // catch is at same level as try
+                blockType = null;
+            } else if (textFromHere.match(/^finally\s*\{/i)) {
+                // finally is at same level as try
+                blockType = null;
+            } else if (textFromHere.match(/^switch\s+on\s+/i)) {
+                blockType = 'switch';
+            }
+
+            if (blockType) {
+                controlStack.push({
+                    type: blockType,
+                    braceDepth: braceDepth,
+                    hasBrace: false
+                });
+
+                // Calculate actual nesting depth based on control stack
+                const nestingDepth = controlStack.length;
+
+                // Report if too deep and not already reported for this line
+                if (nestingDepth > 3 && !reportedLines.has(currentLine)) {
+                    reportedLines.add(currentLine);
+                    deepNestings.push({
+                        depth: nestingDepth,
+                        line: currentLine,
+                        startChar: currentChar,
+                        endChar: currentChar + blockType.length,
+                        blockType: blockType
+                    });
+                }
+            }
+        }
+
+        return deepNestings;
     }
 }

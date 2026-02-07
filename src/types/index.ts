@@ -13,7 +13,9 @@ export enum AntiPatternType {
     UntestedField = 'UNTESTED_FIELD',
     RecordTypeQuery = 'RECORDTYPE_QUERY',
     SingleSObjectParameter = 'SINGLE_SOBJECT_PARAMETER',
-    NonBulkifiedInvocable = 'NON_BULKIFIED_INVOCABLE'
+    NonBulkifiedInvocable = 'NON_BULKIFIED_INVOCABLE',
+    TriggerWithoutRecursionGuard = 'TRIGGER_WITHOUT_RECURSION_GUARD',
+    DeeplyNestedCode = 'DEEPLY_NESTED_CODE'
 }
 
 /**
@@ -29,7 +31,9 @@ export const AntiPatternSeverity: Record<AntiPatternType, vscode.DiagnosticSever
     [AntiPatternType.UntestedField]: vscode.DiagnosticSeverity.Warning,
     [AntiPatternType.RecordTypeQuery]: vscode.DiagnosticSeverity.Warning,
     [AntiPatternType.SingleSObjectParameter]: vscode.DiagnosticSeverity.Warning,
-    [AntiPatternType.NonBulkifiedInvocable]: vscode.DiagnosticSeverity.Error
+    [AntiPatternType.NonBulkifiedInvocable]: vscode.DiagnosticSeverity.Error,
+    [AntiPatternType.TriggerWithoutRecursionGuard]: vscode.DiagnosticSeverity.Warning,
+    [AntiPatternType.DeeplyNestedCode]: vscode.DiagnosticSeverity.Warning
 };
 
 /**
@@ -148,6 +152,32 @@ export interface FieldReferenceInfo {
 }
 
 /**
+ * Represents a deeply nested code block
+ */
+export interface DeepNestingInfo {
+    depth: number;
+    line: number;
+    startChar: number;
+    endChar: number;
+    blockType: string;  // 'if', 'for', 'while', 'try', etc.
+}
+
+/**
+ * Represents a trigger definition
+ */
+export interface TriggerInfo {
+    name: string;
+    objectName: string;
+    events: string[];  // before insert, after update, etc.
+    startLine: number;
+    endLine: number;
+    startChar: number;
+    endChar: number;
+    containsDML: DMLInfo[];
+    hasRecursionGuard: boolean;
+}
+
+/**
  * Extension configuration
  */
 export interface ExtensionConfig {
@@ -161,6 +191,9 @@ export interface ExtensionConfig {
     detectUntestedFields: boolean;
     detectRecordTypeQueries: boolean;
     detectNonBulkifiedMethods: boolean;
+    detectTriggerRecursion: boolean;
+    detectDeeplyNestedCode: boolean;
+    maxNestingDepth: number;
 }
 
 /**
@@ -176,4 +209,7 @@ export interface ParsedApexFile {
     fieldReferences: FieldReferenceInfo[];
     isTestClass: boolean;
     className: string;
+    isTrigger: boolean;
+    triggerInfo?: TriggerInfo;
+    deepNestings: DeepNestingInfo[];
 }
